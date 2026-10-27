@@ -416,15 +416,20 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
     if (instr.dimension == TextureDimension::Texture1D)
         out += ", 0.5)";
 
+    // Skylanders: the scale of a resolved texture (host size = guest size x g_ResolutionScale, bit n of g_ScaledTextures =
+    // sampler register n): the fetch's offsets are guest texels, so the helpers multiply them by it (and the weights of a
+    // getWeights fetch are taken on the guest texel grid). The kernels of blurs and shadow filters then cover the same
+    // screen area at every scale. 1 in a vertex shader (its samplers are not in g_ScaledTextures).
+    std::string scale = isPixelShader ? fmt::format("(g_ScaledTextures & {}u) != 0 ? g_ResolutionScale : 1.0", 1u << instr.constIndex) : "1.0";
     switch (instr.dimension)
     {
     case TextureDimension::Texture1D:
-        print(", float2({}, 0.0)", instr.offsetX * 0.5f);
+        print(", float2({}, 0.0), {}", instr.offsetX * 0.5f, scale);
         break;
     case TextureDimension::Texture2D:
         print(", float2({}, {})", instr.offsetX * 0.5f, instr.offsetY * 0.5f);
-        if (instr.texCoordDenorm)
-            print(", (g_ScaledTextures & {}u) != 0 ? g_ResolutionScale : 1.0", 1u << instr.constIndex);
+        if (instr.texCoordDenorm || isPixelShader || instr.opcode != FetchOpcode::TextureFetch)
+            print(", {}", scale);
         break;
     case TextureDimension::TextureCube:
         println("\n#ifdef __air__");

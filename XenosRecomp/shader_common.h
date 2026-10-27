@@ -140,15 +140,17 @@ uint2 getTexture2DDimensions(texture2d<float> texture)
     return uint2(texture.get_width(), texture.get_height());
 }
 
+// Skylanders: `scale` is g_ResolutionScale for a resolved texture (host size = guest size x scale), else 1: the offset is in
+// guest texels.
 float4 tfetch2D(constant Texture2DDescriptorHeap* textureHeap,
                 constant SamplerDescriptorHeap* samplerHeap,
                 uint resourceDescriptorIndex,
                 uint samplerDescriptorIndex,
-                float2 texCoord, float2 offset)
+                float2 texCoord, float2 offset, float scale)
 {
     texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
     sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
-    return texture.sample(sampler, texCoord + offset / (float2)getTexture2DDimensions(texture));
+    return texture.sample(sampler, texCoord + offset * scale / (float2)getTexture2DDimensions(texture));
 }
 
 // Skylanders: a vertex shader's fetch, at level 0.
@@ -163,14 +165,15 @@ float4 tfetch2DVertex(constant Texture2DDescriptorHeap* textureHeap,
     return texture.sample(sampler, texCoord + offset / (float2)getTexture2DDimensions(texture), level(0));
 }
 
+// Skylanders: the bilinear weights on the guest texel grid (the host one divided by `scale`), to go with offsets in guest texels.
 float2 getWeights2D(constant Texture2DDescriptorHeap* textureHeap,
                     constant SamplerDescriptorHeap* samplerHeap,
                     uint resourceDescriptorIndex,
                     uint samplerDescriptorIndex,
-                    float2 texCoord, float2 offset)
+                    float2 texCoord, float2 offset, float scale)
 {
     texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
-    return select(fract(texCoord * float2(getTexture2DDimensions(texture)) + offset - 0.5), 0.0, isnan(texCoord));
+    return select(fract(texCoord * float2(getTexture2DDimensions(texture)) / scale + offset - 0.5), 0.0, isnan(texCoord));
 }
 
 // Skylanders: fetches with unnormalized coordinates (the instruction's texCoordDenorm bit): the coordinates are guest
@@ -241,10 +244,11 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
     return dimensions;
 }
 
-float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
+// Skylanders: `scale` as above (offsets in guest texels).
+float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float scale)
 {
     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
-    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
+    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset * scale / getTexture2DDimensions(texture));
 }
 
 // Skylanders: a vertex shader's fetch, at level 0.
@@ -254,10 +258,10 @@ float4 tfetch2DVertex(uint resourceDescriptorIndex, uint samplerDescriptorIndex,
     return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture), 0);
 }
 
-float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
+float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float scale)
 {
     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
-    return select(isnan(texCoord), 0.0, frac(texCoord * getTexture2DDimensions(texture) + offset - 0.5));
+    return select(isnan(texCoord), 0.0, frac(texCoord * getTexture2DDimensions(texture) / scale + offset - 0.5));
 }
 
 // Skylanders: unnormalized coordinates (texCoordDenorm), in texels.
