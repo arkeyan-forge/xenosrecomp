@@ -42,9 +42,9 @@ struct RecompiledShader
 };
 
 // Skylanders: a compiled shader is kept in <cache dir>/<hash>.bin, keyed by the hash of the translated HLSL (and what
-// else the compilers are given), not by the original shader: a second run (SSABuild's movie pass, or the run after a
+// else the compilers are given), not by the original shader: a second run (SkyBuild's movie pass, or the run after a
 // game update whose translator changed) translates every shader again, which is fast, and compiles only those whose
-// translated text is new (the text starts with shader_common.h, so that is covered). SSABuild empties the folder when
+// translated text is new (the text starts with shader_common.h, so that is covered). SkyBuild empties the folder when
 // the compilers (dxc) change.
 struct ShaderCache
 {
@@ -210,7 +210,7 @@ static std::string label_lower(const char* name)
     return text;
 }
 
-// SSABuild reads these lines while the program runs (the launcher's progress bar): flushed, as stdout is a file.
+// SkyBuild reads these lines while the program runs (the launcher's progress bar): flushed, as stdout is a file.
 static void reportProgress(size_t done, size_t total)
 {
     if ((done % 10) == 0 || done == total)
