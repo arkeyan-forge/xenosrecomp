@@ -41,15 +41,17 @@ struct RecompiledShader
     std::string dxilError; // set when only the DXIL failed: the entry then has no DXIL (not drawn on D3D12)
 };
 
-// Skylanders: a translated shader is kept in <cache dir>/<hash>.bin, so that a second run (SSABuild's movie pass: the
-// same shaders plus a few) translates only what is new. A file is trusted only if it was made from the same
-// shader_common.h; SSABuild empties the folder when the kit changes.
+// Skylanders: a compiled shader is kept in <cache dir>/<hash>.bin, keyed by the hash of the translated HLSL (and what
+// else the compilers are given), not by the original shader: a second run (SSABuild's movie pass, or the run after a
+// game update whose translator changed) translates every shader again, which is fast, and compiles only those whose
+// translated text is new (the text starts with shader_common.h, so that is covered). SSABuild empties the folder when
+// the compilers (dxc) change.
 struct ShaderCache
 {
     std::filesystem::path dir;
-    uint64_t key = 0; // hash of shader_common.h
+    uint64_t key = 0; // format marker
 
-    static constexpr uint32_t MAGIC = 0x31435853; // "SXC1"
+    static constexpr uint32_t MAGIC = 0x32435853; // "SXC2"
 
     std::filesystem::path pathOf(XXH64_hash_t hash) const { return dir / fmt::format("{:016X}.bin", hash); }
 
@@ -111,8 +113,11 @@ struct ShaderCache
     }
 };
 
+static ShaderCache* g_shaderCache = nullptr;
+
 void recompileShader(RecompiledShader& shader, const std::string_view include)
 {
+    XXH64_hash_t contentHash = 0; // Skylanders: of the translated text, 0 until it exists
     try
     {
     thread_local ShaderRecompiler recompiler;
@@ -120,6 +125,16 @@ void recompileShader(RecompiledShader& shader, const std::string_view include)
     recompiler.recompile(shader.data, include);
 
     shader.specConstantsMask = recompiler.specConstantsMask;
+
+    // Skylanders: the compiled outputs depend on the translated text and these three values only.
+    if (g_shaderCache != nullptr)
+    {
+        contentHash = XXH3_64bits(recompiler.out.data(), recompiler.out.size());
+        uint32_t extra[3] = { recompiler.isPixelShader ? 1u : 0u, recompiler.exportsPointSize ? 1u : 0u, recompiler.specConstantsMask };
+        contentHash ^= XXH3_64bits(extra, sizeof(extra)) * 0x9E3779B97F4A7C15ull;
+        if (g_shaderCache->load(contentHash, shader))
+            return;
+    }
 
     thread_local DxcCompiler dxcCompiler;
 
@@ -184,6 +199,8 @@ void recompileShader(RecompiledShader& shader, const std::string_view include)
     {
         shader.error = exception.what();
     }
+    if (g_shaderCache != nullptr && contentHash != 0)
+        g_shaderCache->store(contentHash, shader);
 }
 
 static std::string label_lower(const char* name)
@@ -248,8 +265,9 @@ int main(int argc, char** argv)
     if (argc > 4)
     {
         cache.dir = argv[4];
-        cache.key = XXH3_64bits(include.data(), include.size());
+        cache.key = 1; // the translated text starts with shader_common.h, so its hash covers it
         std::filesystem::create_directories(cache.dir);
+        g_shaderCache = &cache;
     }
 #endif
 
@@ -330,12 +348,7 @@ int main(int argc, char** argv)
                         shaderQueue.pop_front();
                     }
                     RecompiledShader& shader = shaders[shaderHash];
-                    if (cache.dir.empty() || !cache.load(shaderHash, shader))
-                    {
-                        recompileShader(shader, include);
-                        if (!cache.dir.empty())
-                            cache.store(shaderHash, shader);
-                    }
+                    recompileShader(shader, include);
                     reportProgress(++progress, shaders.size());
                 }
             });
