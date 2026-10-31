@@ -95,6 +95,7 @@ static constexpr DeclUsageLocation USAGE_LOCATIONS[] =
     { DeclUsage::TexCoord, 7, 15 },
     { DeclUsage::Position, 1, 15 },
     { DeclUsage::PointSize, 0, 16 }, // particle point sprites
+    { DeclUsage::TexCoord, 8, 17 }, // Trap Team: with TexCoord 7 (15), so not 16 (the point size) either
 };
 
 static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
