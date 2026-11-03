@@ -31,12 +31,14 @@ struct ShaderRecompiler : StringBuffer
     std::unordered_map<uint32_t, VertexElement> vertexElements;
     std::unordered_map<uint32_t, std::string> interpolators;
     std::unordered_map<uint32_t, const ConstantInfo*> float4Constants;
+    std::unordered_set<uint32_t> literalConstants; // Skylanders: def registers that win over a synthetic g_C
     std::unordered_map<uint32_t, const char*> boolConstants;
     std::unordered_map<uint32_t, const char*> samplers;
     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
     uint32_t specConstantsMask = 0;
     bool exportsPointSize = false; // Skylanders: point sprites
     bool vertexSamplers = false;   // Skylanders: a vertex shader whose constant table lists samplers (vertex texture fetch)
+    bool usesTextureLod = false;
 
 #ifdef UNLEASHED_RECOMP
     bool hasMtxProjection = false;

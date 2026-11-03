@@ -17,6 +17,7 @@
 #include <fmt/core.h>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <xxhash.h>
 #include <zstd.h>
 #include <stdexcept>

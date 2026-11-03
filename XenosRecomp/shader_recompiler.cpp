@@ -1,6 +1,77 @@
 #include "shader_recompiler.h"
 #include "shader_common.h"
 
+// Emit only for shaders with explicit LOD state. Keeping shader_common.h unchanged also keeps the complete
+// translated text (and its compilation cache key) byte-identical for shaders without these instructions.
+static constexpr std::string_view TEXTURE_LOD_HELPERS = R"(
+#ifdef __air__
+float4 tfetch2DLod(constant Texture2DDescriptorHeap* textureHeap,
+                  constant SamplerDescriptorHeap* samplerHeap,
+                  uint resourceDescriptorIndex, uint samplerDescriptorIndex,
+                  float2 texCoord, float2 offset, float scale, float lod)
+{
+    texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
+    sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
+    return texture.sample(sampler, texCoord + offset * scale / (float2)getTexture2DDimensions(texture), level(lod));
+}
+
+// The pixel-position offset of tfetch2DDenorm (shader_common.h): the host pixel's own texel at any resolution scale.
+float4 tfetch2DLodDenorm(constant Texture2DDescriptorHeap* textureHeap,
+                        constant SamplerDescriptorHeap* samplerHeap,
+                        uint resourceDescriptorIndex, uint samplerDescriptorIndex,
+                        float2 texCoord, float2 offset, float scale, float lod)
+{
+    texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
+    sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
+    return texture.sample(sampler, ((texCoord + offset) * scale + 0.5 * (scale - 1.0)) / (float2)getTexture2DDimensions(texture), level(lod));
+}
+
+float4 tfetch3DLod(constant Texture3DDescriptorHeap* textureHeap,
+                  constant SamplerDescriptorHeap* samplerHeap,
+                  uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float lod)
+{
+    return textureHeap[resourceDescriptorIndex].tex.sample(samplerHeap[samplerDescriptorIndex].samp, texCoord, level(lod));
+}
+
+float4 tfetchCubeLod(constant TextureCubeDescriptorHeap* textureHeap,
+                    constant SamplerDescriptorHeap* samplerHeap,
+                    uint resourceDescriptorIndex, uint samplerDescriptorIndex,
+                    float3 texCoord, thread CubeMapData* cubeMapData, float lod)
+{
+    return textureHeap[resourceDescriptorIndex].tex.sample(samplerHeap[samplerDescriptorIndex].samp,
+        cubeMapData->cubeMapDirections[(uint)texCoord.z], level(lod));
+}
+#else
+float4 tfetch2DLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex,
+                  float2 texCoord, float2 offset, float scale, float lod)
+{
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+    return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex],
+        texCoord + offset * scale / getTexture2DDimensions(texture), lod);
+}
+
+float4 tfetch2DLodDenorm(uint resourceDescriptorIndex, uint samplerDescriptorIndex,
+                        float2 texCoord, float2 offset, float scale, float lod)
+{
+    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+    return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex],
+        ((texCoord + offset) * scale + 0.5 * (scale - 1.0)) / getTexture2DDimensions(texture), lod);
+}
+
+float4 tfetch3DLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float lod)
+{
+    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, lod);
+}
+
+float4 tfetchCubeLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex,
+                    float3 texCoord, inout CubeMapData cubeMapData, float lod)
+{
+    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex],
+        cubeMapData.cubeMapDirections[(uint)texCoord.z], lod);
+}
+#endif
+)";
+
 static constexpr char SWIZZLES[] = 
 { 
     'x',
@@ -282,8 +353,21 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
 
 void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicubic)
 {
+    if (isPixelShader && instr.opcode == FetchOpcode::SetTextureLod)
+    {
+        usesTextureLod = true;
+        indent();
+        if (instr.isPredicated)
+            print("if ({}p0) ", instr.predCondition ? "" : "!");
+        println("textureLod = r{}.{};", uint32_t(instr.srcRegister), SWIZZLES[instr.srcSwizzle & 3]);
+        return;
+    }
+
     if (instr.opcode != FetchOpcode::TextureFetch && instr.opcode != FetchOpcode::GetTextureWeights)
         return;
+
+    const bool explicitLod = isPixelShader && instr.opcode == FetchOpcode::TextureFetch && instr.useRegLod;
+    usesTextureLod |= explicitLod;
 
     if (instr.isPredicated)
     {
@@ -389,6 +473,8 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
     }
 
     out += dimension;
+    if (explicitLod)
+        out += "Lod";
     if (!isPixelShader && instr.opcode == FetchOpcode::TextureFetch && instr.dimension == TextureDimension::Texture2D)
         out += "Vertex"; // Skylanders: sampled at level 0 (a vertex shader has no derivatives)
 
@@ -441,6 +527,14 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
         println(", cubeMapData");
         println("#endif");
         break;
+    }
+
+    if (explicitLod)
+    {
+        out += ", textureLod";
+        // The signed instruction bias is in sixteenths of a mip level.
+        if (instr.lodBias != 0)
+            print(" + ({})", instr.lodBias / 16.0f);
     }
 
     out += ").";
@@ -561,6 +655,8 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             else
             {
                 auto findResult = float4Constants.find(reg);
+                if (literalConstants.count(reg) != 0 && !instr.const0Relative && !instr.const1Relative)
+                    findResult = float4Constants.end();
                 if (findResult != float4Constants.end())
                 {
                     const char* constantName = reinterpret_cast<const char*>(constantTableData + findResult->second->name);
@@ -623,6 +719,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
 
                 case AluVectorOpcode::Dp4:
                 case AluVectorOpcode::Max4:
+                case AluVectorOpcode::Cube:
                     mask = 0b1111;
                     break;
 
@@ -992,15 +1089,27 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             }
 
         case AluVectorOpcode::Cube:
+        {
             operationResultComponentCount = 4;
+            // CUBE packs a direction as src0 = (z,z,x,y), src1 = (y,x,z,z). Decode after applying
+            // operand selection, swizzles and modifiers, rather than assuming the register contains xyz.
+            // Keep the old spelling for the canonical case, including its compilation cache key.
+            const bool canonical = instr.src1Select && instr.src2Select &&
+                instr.src1Register < 64 && instr.src1Register == instr.src2Register &&
+                instr.src1Swizzle == 0xA6 && instr.src2Swizzle == 0xCD &&
+                !instr.src1Negate && !instr.src2Negate;
+            const std::string direction = canonical ? fmt::format("r{}", instr.src1Register) :
+                fmt::format("float4(({}).z, ({}).x, ({}).z, 0.0)",
+                    op(VECTOR_0).expression, op(VECTOR_1).expression, op(VECTOR_1).expression);
             println("\n#ifdef __air__");
             indent();
-            print("cube(r{}, &cubeMapData)", instr.src1Register);
+            print("cube({}, &cubeMapData)", direction);
             println("\n#else");
             indent();
-            print("cube(r{}, cubeMapData)", instr.src1Register);
+            print("cube({}, cubeMapData)", direction);
             println("\n#endif");
             break;
+        }
 
         case AluVectorOpcode::Max4:
             operationResultComponentCount = 4;
@@ -1399,6 +1508,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
     out += include;
     out += '\n';
+    const size_t textureHelpersPosition = out.size();
 
     isPixelShader = (shaderContainer->flags & 0x1) == 0;
 
@@ -1992,6 +2102,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             auto value = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + definition->physicalOffset);
             for (uint16_t i = 0; i < (definition->count + 3) / 4; i++)
             {
+                // The synthetic g_C covers every register: as in D3D9, the shader's own literal wins over the buffer.
+                if (!syntheticTable.empty())
+                    literalConstants.insert(definition->registerIndex + i - (isPixelShader ? 256 : 0));
                 println("#ifdef __air__");
                 println("\tfloat4 c{} = as_type<float4>(uint4(0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}));",
                     definition->registerIndex + i - (isPixelShader ? 256 : 0), value[0].get(), value[1].get(), value[2].get(), value[3].get());
@@ -2124,6 +2237,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     out += "\tint aL = 0;\n";
     out += "\tbool p0 = false;\n";
     out += "\tfloat ps = 0.0;\n";
+    // Insert LOD state here after instruction emission tells us whether it is needed. This is outside all
+    // guest branches, loop iterations and PC dispatch blocks, so only an executed setter changes the state.
+    const size_t textureLodPosition = out.size();
     if (isPixelShader)
     {
 #ifdef UNLEASHED_RECOMP
@@ -2540,6 +2656,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 #endif
 
     out += "}";
+
+    if (usesTextureLod)
+    {
+        out.insert(textureLodPosition, "\tfloat textureLod = 0.0;\n");
+        out.insert(textureHelpersPosition, TEXTURE_LOD_HELPERS);
+    }
 
     // Skylanders: Metal rejects a point size output in pipelines that draw triangles, so only vertex shaders that
     // export one keep it (with the kill-vertex flag of the same export, pts.z: a killed point goes off screen).

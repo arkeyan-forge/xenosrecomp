@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <spawn.h>
 #include <unistd.h>
 
@@ -30,6 +31,42 @@ static int executeCommand(const char** argv)
     return status;
 }
 
+// Skylanders: nearly all of a shader's Metal compile is reading shader_common.h (Metal's texture templates), so it is
+// compiled once into a precompiled header that every shader is given; the shader's own copy of the header, at its start,
+// is then skipped by its include guard. The code compiled is the same; only the AIR's metadata (the command line, one
+// more file) differs. Without a header (commonHeader empty) or if Metal fails to make it, each shader reads it itself.
+static const char* const MetalOptions[] = { "-Wno-unused-variable", "-frecord-sources", "-gline-tables-only", "-fmetal-math-mode=relaxed", "-fpreserve-invariance", "-D__air__",
+#ifdef UNLEASHED_RECOMP
+    "-DUNLEASHED_RECOMP",
+#endif
+};
+
+static const std::string& commonHeaderPch()
+{
+    static std::once_flag once;
+    static std::string headerPath, pchPath;
+    std::call_once(once, []
+    {
+        char headerTemplate[PATH_MAX] = "/tmp/xenos_metal_XXXXXX.h";
+        const int fd = AirCompiler::commonHeader.empty() ? -1 : mkstemps(headerTemplate, 2);
+        if (fd == -1)
+            return;
+        const ssize_t written = write(fd, AirCompiler::commonHeader.data(), AirCompiler::commonHeader.size());
+        close(fd);
+        headerPath = headerTemplate;
+        std::string pch = headerPath + ".pch";
+        std::vector<const char*> command = { "/usr/bin/xcrun", "-sdk", "macosx", "metal", "-x", "metal-header", "-o", pch.c_str(), headerPath.c_str() };
+        command.insert(command.end(), std::begin(MetalOptions), std::end(MetalOptions));
+        command.push_back(nullptr);
+        if (written == ssize_t(AirCompiler::commonHeader.size()) && executeCommand(command.data()) == 0)
+            pchPath = pch;
+        else
+            unlink(pch.c_str());
+    });
+    static const TemporaryPath removeHeader(headerPath), removePch(pchPath);
+    return pchPath;
+}
+
 std::vector<uint8_t> AirCompiler::compile(const std::string& shaderSource)
 {
     // Save source to a location on disk for the compiler to read.
@@ -53,14 +90,12 @@ std::vector<uint8_t> AirCompiler::compile(const std::string& shaderSource)
         std::exit(1);
     }
 
-    const char* compileCommand[] = {
-        "/usr/bin/xcrun", "-sdk", "macosx", "metal", "-o", irPath.path.c_str(), "-c", sourcePath.path.c_str(), "-Wno-unused-variable", "-frecord-sources", "-gline-tables-only", "-fmetal-math-mode=relaxed", "-fpreserve-invariance", "-D__air__",
-#ifdef UNLEASHED_RECOMP
-        "-DUNLEASHED_RECOMP",
-#endif
-        nullptr
-    };
-    if (const int compileStatus = executeCommand(compileCommand); compileStatus != 0)
+    std::vector<const char*> compileCommand = { "/usr/bin/xcrun", "-sdk", "macosx", "metal", "-o", irPath.path.c_str(), "-c", sourcePath.path.c_str() };
+    compileCommand.insert(compileCommand.end(), std::begin(MetalOptions), std::end(MetalOptions));
+    if (const std::string& pch = commonHeaderPch(); !pch.empty())
+        compileCommand.insert(compileCommand.end(), { "-include-pch", pch.c_str() });
+    compileCommand.push_back(nullptr);
+    if (const int compileStatus = executeCommand(compileCommand.data()); compileStatus != 0)
     {
         throw std::runtime_error(fmt::format("Metal compiler exited with status {}", compileStatus));
     }

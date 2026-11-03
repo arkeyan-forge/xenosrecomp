@@ -187,7 +187,11 @@ float4 tfetch2DDenorm(constant Texture2DDescriptorHeap* textureHeap,
 {
     texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
     sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
-    return texture.sample(sampler, (texCoord + offset) * scale / (float2)getTexture2DDimensions(texture));
+    // Skylanders: the pixel position is guest pixels (iPos / scale - 0.5), so at scale N a host pixel h lands on host texel
+    // coordinate h + 0.5 - N / 2: the centre of texel h - 1 at scale 2, and even pixels read the previous guest pixel (a
+    // dark checker on the left and top edges of every silhouette). (scale - 1) / 2 puts it back on texel h's left edge,
+    // where the fetch lands at scale 1 and on the console.
+    return texture.sample(sampler, ((texCoord + offset) * scale + 0.5 * (scale - 1.0)) / (float2)getTexture2DDimensions(texture));
 }
 
 float2 getWeights2DDenorm(constant Texture2DDescriptorHeap* textureHeap,
@@ -268,7 +272,8 @@ float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, f
 float4 tfetch2DDenorm(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float scale)
 {
     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
-    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], (texCoord + offset) * scale / getTexture2DDimensions(texture));
+    // Skylanders: (scale - 1) / 2 keeps the fetch on the host pixel's own texel at scale N (see the Metal version).
+    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], ((texCoord + offset) * scale + 0.5 * (scale - 1.0)) / getTexture2DDimensions(texture));
 }
 
 float2 getWeights2DDenorm(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float scale)

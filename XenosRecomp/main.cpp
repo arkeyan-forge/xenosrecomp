@@ -41,6 +41,20 @@ struct RecompiledShader
     std::string dxilError; // set when only the DXIL failed: the entry then has no DXIL (not drawn on D3D12)
 };
 
+// Skylanders: the streams compiled. A game reads one or two (macOS the AIR, Linux the SPIR-V, Windows the DXIL and the
+// SPIR-V): SkyBuild names them in the 5th argument ("air", "spirv", "dxil,spirv"), the others are written empty. Without
+// it, every stream this build has (the developer tools: one cache for every build).
+enum : uint32_t { StreamDxil = 1, StreamSpirv = 2, StreamAir = 4 };
+static constexpr uint32_t BuiltStreams = StreamSpirv
+#ifdef XENOS_RECOMP_DXIL
+    | StreamDxil
+#endif
+#ifdef XENOS_RECOMP_AIR
+    | StreamAir
+#endif
+    ;
+static uint32_t g_streams = BuiltStreams;
+
 // Skylanders: a compiled shader is kept in <cache dir>/<hash>.bin, keyed by the hash of the translated HLSL (and what
 // else the compilers are given), not by the original shader: a second run (SkyBuild's movie pass, or the run after a
 // game update whose translator changed) translates every shader again, which is fast, and compiles only those whose
@@ -49,7 +63,7 @@ struct RecompiledShader
 struct ShaderCache
 {
     std::filesystem::path dir;
-    uint64_t key = 0; // format marker
+    uint64_t key = 0; // format marker: 1 for an entry with all of this build's streams, else 0x100 | its streams
 
     static constexpr uint32_t MAGIC = 0x32435853; // "SXC2"
 
@@ -70,12 +84,17 @@ struct ShaderCache
         auto take = [&](void* out, size_t size) { if (at + size > bytes.size()) return false; memcpy(out, bytes.data() + at, size); at += size; return true; };
         uint32_t magic = 0, mask = 0;
         uint64_t fileKey = 0, sizes[5] = {};
-        if (!take(&magic, 4) || magic != MAGIC || !take(&fileKey, 8) || fileKey != key || !take(&mask, 4) || !take(sizes, sizeof(sizes)))
+        // The entry has the streams asked for: all of this build's (1), or it names them (0x100 | its streams).
+        auto covers = [](uint64_t fileKey) { return fileKey == 1 || (fileKey >> 8 == 1 && (fileKey & g_streams) == g_streams); };
+        if (!take(&magic, 4) || magic != MAGIC || !take(&fileKey, 8) || !covers(fileKey) || !take(&mask, 4) || !take(sizes, sizeof(sizes)))
             return false;
         uint64_t total = 0;
         for (uint64_t size : sizes)
             total += size;
         if (at + total != bytes.size())
+            return false;
+        // A shader that failed with other streams (a SPIR-V error) is compiled again with these; the others are dropped.
+        if (sizes[3] != 0 && fileKey != key)
             return false;
 
         shader.specConstantsMask = mask;
@@ -86,6 +105,12 @@ struct ShaderCache
         auto errorOf = [&](uint64_t size) { auto begin = bytes.begin() + at; at += size; return std::string(begin, begin + size); };
         shader.error = errorOf(sizes[3]);
         shader.dxilError = errorOf(sizes[4]);
+        if ((g_streams & StreamDxil) == 0)
+            shader.dxil.clear(), shader.dxilError.clear();
+        if ((g_streams & StreamSpirv) == 0)
+            shader.spirv.clear();
+        if ((g_streams & StreamAir) == 0)
+            shader.air.clear();
         return true;
     }
 
@@ -142,6 +167,7 @@ void recompileShader(RecompiledShader& shader, const std::string_view include)
     // Skylanders: D3D12 has no specialization constants, so the shader is compiled once per combination of the ones it
     // uses (at most 2 here). Its DXIL entry is: flags (bit 0: the vertex shader outputs a point size), the variant
     // count, each variant's size, then the signed containers, in increasing order of their g_SpecConstants() value.
+    if (g_streams & StreamDxil)
     try
     {
     std::vector<uint32_t> variants;
@@ -182,9 +208,12 @@ void recompileShader(RecompiledShader& shader, const std::string_view include)
 #endif
 
 #ifdef XENOS_RECOMP_AIR
-    shader.air = AirCompiler::compile(recompiler.out);
+    if (g_streams & StreamAir)
+        shader.air = AirCompiler::compile(recompiler.out);
 #endif
 
+    if (g_streams & StreamSpirv)
+    {
     IDxcBlob* spirv = dxcCompiler.compile(recompiler.out, recompiler.isPixelShader, false, true);
     // Skylanders: skipped like a shader Metal rejects (on macOS AIR fails first; elsewhere this was a crash).
     if (spirv == nullptr)
@@ -194,6 +223,7 @@ void recompileShader(RecompiledShader& shader, const std::string_view include)
     assert(result);
 
     spirv->Release();
+    }
     }
     catch (const std::exception& exception)
     {
@@ -269,6 +299,28 @@ int main(int argc, char** argv)
         std::filesystem::create_directories(cache.dir);
         g_shaderCache = &cache;
     }
+    // Optional 5th argument: the streams (see BuiltStreams).
+    if (argc > 5)
+    {
+        g_streams = 0;
+        for (std::string_view list = argv[5]; !list.empty();)
+        {
+            std::string_view name = list.substr(0, list.find(','));
+            list.remove_prefix(std::min(list.size(), name.size() + 1));
+            uint32_t stream = name == "dxil" ? StreamDxil : name == "spirv" ? StreamSpirv : name == "air" ? StreamAir : 0;
+            if ((stream & BuiltStreams) == 0)
+            {
+                fmt::println("Unknown or unsupported stream: {}", name);
+                return 1;
+            }
+            g_streams |= stream;
+        }
+        if (g_streams != BuiltStreams)
+            cache.key = 0x100 | g_streams;
+    }
+#endif
+#ifdef XENOS_RECOMP_AIR
+    AirCompiler::commonHeader = include;
 #endif
 
     if (std::filesystem::is_directory(input))
@@ -420,16 +472,27 @@ int main(int argc, char** argv)
 
         f.println("}};");
 
-        int level = ZSTD_maxCLevel();
-
-        // Skylanders: the three caches are compressed (zstd at its highest level, one core each) and written as C
-        // arrays side by side; the text is the same as when this ran one after the other.
-        auto block = [level](const std::vector<uint8_t>& data, const char* name, const char* label)
+        // Skylanders: the three caches are compressed (one core each) and written as C arrays side by side; the text is
+        // the same as when this ran one after the other. zstd level 12 with a 128 MB long-distance window finds the
+        // repeats across shaders that level 22 found, 15 to 20 times faster, for about a fifth more bytes (Giants' AIR:
+        // 4 s instead of 59 s, 49 MB instead of 42 MB); the game decompresses either the same way.
+        auto block = [](const std::vector<uint8_t>& data, const char* name, const char* label)
         {
             fmt::println("Compressing {} cache...", label);
             fflush(stdout);
             std::vector<uint8_t> compressed(ZSTD_compressBound(data.size()));
-            compressed.resize(ZSTD_compress(compressed.data(), compressed.size(), data.data(), data.size(), level));
+            ZSTD_CCtx* context = ZSTD_createCCtx();
+            ZSTD_CCtx_setParameter(context, ZSTD_c_compressionLevel, 12);
+            ZSTD_CCtx_setParameter(context, ZSTD_c_enableLongDistanceMatching, 1);
+            ZSTD_CCtx_setParameter(context, ZSTD_c_windowLog, 27);
+            size_t size = ZSTD_compress2(context, compressed.data(), compressed.size(), data.data(), data.size());
+            ZSTD_freeCCtx(context);
+            if (ZSTD_isError(size))
+            {
+                fmt::println("Compressing the {} cache failed: {}", label, ZSTD_getErrorName(size));
+                std::exit(1);
+            }
+            compressed.resize(size);
 
             StringBuffer text;
             text.print("const uint8_t g_compressed{}Cache[] = {{", name);
