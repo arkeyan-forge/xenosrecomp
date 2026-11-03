@@ -40,6 +40,20 @@ struct PushConstants
 #define g_ResolutionScale          vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 300)
 #define g_ParamGen                 vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 276)
 #define g_ScaledTextures           vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 312)
+// Skylanders: the vertices a fetch with a computed index reads, gathered by the host as float4s (count 0: none, and the
+// address is then 0: never read).
+#define g_PulledVertices           vk::RawBufferLoad<uint64_t>(g_PushConstants.SharedConstants + 288)
+#define g_PulledCount              vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 296)
+
+float4 pulledVertex(float index)
+{
+    uint count = g_PulledCount;
+    if (count == 0)
+        return float4(0.0, 0.0, 0.0, 0.0);
+    return vk::RawBufferLoad<float4>(g_PulledVertices + uint64_t(min(uint(index), count - 1)) * 16, 16);
+}
+
+#define PULLED_VERTEX(index) pulledVertex(index)
 
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 

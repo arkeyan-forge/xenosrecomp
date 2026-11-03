@@ -6,6 +6,7 @@
 #include "shader.h"
 #include "shader_recompiler.h"
 #include "dxc_compiler.h"
+#include "shader_cache_key.h"
 
 #ifdef XENOS_RECOMP_AIR
 #include "air_compiler.h"
@@ -60,10 +61,25 @@ static uint32_t g_streams = BuiltStreams;
 // game update whose translator changed) translates every shader again, which is fast, and compiles only those whose
 // translated text is new (the text starts with shader_common.h, so that is covered). SkyBuild empties the folder when
 // the compilers (dxc) change.
+// What an entry's compiled outputs depend on besides the translated text: this format, the streams this build can make
+// and the compilers' arguments. Bump CacheFormat when the outputs change in a way none of these show (signDxil, the
+// entry layout). The key's low 12 bits are 0x100 | the entry's streams; the rest is this hash.
+static constexpr uint32_t CacheFormat = 3;
+static uint64_t configurationKey()
+{
+    std::string text = fmt::format("XenosRecomp shader cache {}\nstreams {}\n", CacheFormat, uint32_t(BuiltStreams));
+    text += DxcCompiler::signature();
+#ifdef XENOS_RECOMP_AIR
+    text += AirCompiler::signature();
+#endif
+    return XXH3_64bits(text.data(), text.size()) & ~0xFFFull;
+}
+
 struct ShaderCache
 {
     std::filesystem::path dir;
-    uint64_t key = 0; // format marker: 1 for an entry with all of this build's streams, else 0x100 | its streams
+    uint64_t configuration = 0; // configurationKey()
+    uint64_t key = 0;           // what this run writes: configuration | 0x100 | the streams it compiles
 
     static constexpr uint32_t MAGIC = 0x32435853; // "SXC2"
 
@@ -84,8 +100,10 @@ struct ShaderCache
         auto take = [&](void* out, size_t size) { if (at + size > bytes.size()) return false; memcpy(out, bytes.data() + at, size); at += size; return true; };
         uint32_t magic = 0, mask = 0;
         uint64_t fileKey = 0, sizes[5] = {};
-        // The entry has the streams asked for: all of this build's (1), or it names them (0x100 | its streams).
-        auto covers = [](uint64_t fileKey) { return fileKey == 1 || (fileKey >> 8 == 1 && (fileKey & g_streams) == g_streams); };
+        // The entry was made with these compilers and arguments, and has the streams asked for. An entry of an older
+        // format (key 1, or 0x100 | streams) never matches: a cache filled without DXIL, or with other options, is
+        // compiled again instead of giving shaders without DXIL and no error.
+        auto covers = [this](uint64_t fileKey) { return CacheKeyCovers(fileKey, configuration, g_streams); };
         if (!take(&magic, 4) || magic != MAGIC || !take(&fileKey, 8) || !covers(fileKey) || !take(&mask, 4) || !take(sizes, sizeof(sizes)))
             return false;
         uint64_t total = 0;
@@ -295,7 +313,7 @@ int main(int argc, char** argv)
     if (argc > 4)
     {
         cache.dir = argv[4];
-        cache.key = 1; // the translated text starts with shader_common.h, so its hash covers it
+        cache.configuration = configurationKey(); // the translated text starts with shader_common.h: its hash covers that
         std::filesystem::create_directories(cache.dir);
         g_shaderCache = &cache;
     }
@@ -315,9 +333,8 @@ int main(int argc, char** argv)
             }
             g_streams |= stream;
         }
-        if (g_streams != BuiltStreams)
-            cache.key = 0x100 | g_streams;
     }
+    cache.key = cache.configuration | 0x100 | g_streams;
 #endif
 #ifdef XENOS_RECOMP_AIR
     AirCompiler::commonHeader = include;

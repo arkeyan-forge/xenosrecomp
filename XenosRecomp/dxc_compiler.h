@@ -9,6 +9,9 @@ struct DxcCompiler
 
     // `specConstants`: for DXIL, the value g_SpecConstants() returns (shader_common.h).
     IDxcBlob* compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv, uint32_t specConstants = 0);
+
+    // Skylanders: the arguments compile() gives dxc for vertex and pixel shaders, DXIL and SPIR-V (the shader cache's key).
+    static std::string signature();
 };
 
 // Skylanders: fills in the hash of a DXIL container, which D3D12 checks ("signed"). dxc only writes it when it finds

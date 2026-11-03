@@ -11,14 +11,10 @@ DxcCompiler::~DxcCompiler()
     dxcCompiler->Release();
 }
 
-IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv, uint32_t specConstants)
+// Skylanders: the arguments of one compile, kept apart so that signature() names exactly what compile() passes.
+static std::vector<std::wstring> arguments(bool compilePixelShader, bool compileLibrary, bool compileSpirv, uint32_t specConstants)
 {
-    DxcBuffer source{};
-    source.Ptr = shaderSource.c_str();
-    source.Size = shaderSource.size();
-
-    const wchar_t* args[32]{};
-    uint32_t argCount = 0;
+    std::vector<std::wstring> args;
 
     const wchar_t* target = nullptr;
     if (compileLibrary)
@@ -36,39 +32,61 @@ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixe
 
     if (!compileLibrary)
     {
-        args[argCount++] = L"-E shaderMain";
+        args.push_back(L"-E shaderMain");
     }
 
-    args[argCount++] = target;
-    args[argCount++] = L"-HV 2021";
-    args[argCount++] = L"-all-resources-bound";
+    args.push_back(target);
+    args.push_back(L"-HV 2021");
+    args.push_back(L"-all-resources-bound");
 
     if (compileSpirv)
     {
-        args[argCount++] = L"-spirv";
-        args[argCount++] = L"-fvk-use-dx-layout";
+        args.push_back(L"-spirv");
+        args.push_back(L"-fvk-use-dx-layout");
 
         if (!compilePixelShader)
-            args[argCount++] = L"-fvk-invert-y";
+            args.push_back(L"-fvk-invert-y");
     }
     else
     {
-        args[argCount++] = L"-Wno-ignored-attributes";
-        args[argCount++] = L"-Qstrip_reflect";
+        args.push_back(L"-Wno-ignored-attributes");
+        args.push_back(L"-Qstrip_reflect");
     }
 
-    args[argCount++] = L"-Qstrip_debug";
+    args.push_back(L"-Qstrip_debug");
 
-    std::wstring specConstantsDefine = L"-DSPEC_CONSTANTS=" + std::to_wstring(specConstants);
     if (!compileSpirv)
-        args[argCount++] = specConstantsDefine.c_str();
+        args.push_back(L"-DSPEC_CONSTANTS=" + std::to_wstring(specConstants));
 
 #ifdef UNLEASHED_RECOMP
-    args[argCount++] = L"-DUNLEASHED_RECOMP";
+    args.push_back(L"-DUNLEASHED_RECOMP");
 #endif
+    return args;
+}
+
+std::string DxcCompiler::signature()
+{
+    std::string text;
+    for (bool spirv : { false, true })
+        for (bool pixel : { false, true })
+            for (const std::wstring& argument : arguments(pixel, false, spirv, 0))
+                text.append(argument.begin(), argument.end()).push_back('\n');
+    return text;
+}
+
+IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv, uint32_t specConstants)
+{
+    DxcBuffer source{};
+    source.Ptr = shaderSource.c_str();
+    source.Size = shaderSource.size();
+
+    const std::vector<std::wstring> argumentText = arguments(compilePixelShader, compileLibrary, compileSpirv, specConstants);
+    std::vector<const wchar_t*> args;
+    for (const std::wstring& argument : argumentText)
+        args.push_back(argument.c_str());
 
     IDxcResult* result = nullptr;
-    HRESULT hr = dxcCompiler->Compile(&source, args, argCount, nullptr, IID_PPV_ARGS(&result));
+    HRESULT hr = dxcCompiler->Compile(&source, args.data(), uint32_t(args.size()), nullptr, IID_PPV_ARGS(&result));
 
     IDxcBlob* object = nullptr;
     if (SUCCEEDED(hr))

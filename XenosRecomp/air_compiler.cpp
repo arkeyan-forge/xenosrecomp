@@ -41,6 +41,14 @@ static const char* const MetalOptions[] = { "-Wno-unused-variable", "-frecord-so
 #endif
 };
 
+std::string AirCompiler::signature()
+{
+    std::string text;
+    for (const char* option : MetalOptions)
+        text.append(option).push_back('\n');
+    return text;
+}
+
 static const std::string& commonHeaderPch()
 {
     static std::once_flag once;

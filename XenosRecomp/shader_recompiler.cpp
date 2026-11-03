@@ -261,8 +261,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
     auto findResult = vertexElements.find(address);
     assert(findResult != vertexElements.end());
 
-    // Skylanders: a fetch whose index is not the vertex index (r0.x) reads the vertices the host gathered for it
-    // (Metal and D3D12; on Vulkan it reads the vertex's own).
+    // Skylanders: a fetch whose index is not the vertex index (r0.x) reads the vertices the host gathered for it.
     DeclUsage usage = findResult->second.usage;
     bool pulled = (instr.srcRegister != 0 || instr.srcSwizzle != 0) && usage != DeclUsage::Normal &&
         usage != DeclUsage::Tangent && usage != DeclUsage::Binormal && usage != DeclUsage::TexCoord;
@@ -328,18 +327,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
         out += ";\n";
     };
 
-    if (pulled)
-    {
-        out += "#ifndef __spirv__\n";
-        printFetch(true);
-        out += "#else\n";
-        printFetch(false);
-        out += "#endif\n";
-    }
-    else
-    {
-        printFetch(false);
-    }
+    printFetch(pulled);
 
     printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
 
@@ -367,7 +355,12 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
         return;
 
     const bool explicitLod = isPixelShader && instr.opcode == FetchOpcode::TextureFetch && instr.useRegLod;
-    usesTextureLod |= explicitLod;
+    // Skylanders: a vertex shader has no derivatives, so its fetches sample level 0: a normalized 2D fetch through
+    // tfetch2DVertex, every other one (1D, unnormalized 2D, 3D, cube) through the explicit-LOD helpers at level 0
+    // (an implicit-LOD Sample does not compile in a vertex shader).
+    const bool vertexLevelZero = !isPixelShader && instr.opcode == FetchOpcode::TextureFetch &&
+        !(instr.dimension == TextureDimension::Texture2D && !instr.texCoordDenorm);
+    usesTextureLod |= explicitLod || vertexLevelZero;
 
     if (instr.isPredicated)
     {
@@ -473,10 +466,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
     }
 
     out += dimension;
-    if (explicitLod)
+    if (explicitLod || vertexLevelZero)
         out += "Lod";
-    if (!isPixelShader && instr.opcode == FetchOpcode::TextureFetch && instr.dimension == TextureDimension::Texture2D)
-        out += "Vertex"; // Skylanders: sampled at level 0 (a vertex shader has no derivatives)
+    if (!isPixelShader && instr.opcode == FetchOpcode::TextureFetch && !vertexLevelZero)
+        out += "Vertex"; // Skylanders: a normalized 2D fetch, sampled at level 0 (a vertex shader has no derivatives)
 
 #ifdef UNLEASHED_RECOMP
     if (bicubic)
@@ -536,6 +529,8 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
         if (instr.lodBias != 0)
             print(" + ({})", instr.lodBias / 16.0f);
     }
+    else if (vertexLevelZero)
+        out += ", 0.0";
 
     out += ").";
 
@@ -1984,6 +1979,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
     out += "};\n";
 
+    // Skylanders (SPIR-V): the point coordinate param_gen writes; dxc has no semantic for the PointCoord built-in.
+    if (isPixelShader)
+        out += "#ifdef __spirv__\n[[vk::ext_builtin_input(16)]] static const float2 iPointCoord;\n#endif\n";
+
     out += "#ifdef __air__\n";
 
     if (isPixelShader)
@@ -2219,13 +2218,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     // value) and the point coordinate in ZW (layout as in Xenia). Screen-space passes drawn as points (lights) read XY.
     if (isPixelShader)
     {
-        out += "#ifdef __air__\n";
+        out += "#if defined(__air__) || defined(__spirv__)\n";
         out += "\tif (g_ParamGen & 0x80000000u)\n\t{\n\t\tfloat4 gen = float4((input.iPos.xy / g_ResolutionScale - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), iPointCoord);\n\t\tswitch (g_ParamGen & 0xFu)\n\t\t{\n";
         for (uint32_t i = 0; i < 16; i++)
             println("\t\tcase {0}: r{0} = gen; break;", i);
         out += "\t\t}\n\t}\n";
         // DXIL: the same without control flow (the point coordinate comes from shaders/point_sprite.hlsl on D3D12).
-        out += "#elif !defined(__spirv__)\n";
+        out += "#else\n";
         out += "\tuint paramGenRegister = (g_ParamGen & 0x80000000u) != 0 ? (g_ParamGen & 0xFu) : 16u;\n";
         out += "\tfloat4 paramGen = float4((input.iPos.xy / g_ResolutionScale - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), input.iPointCoord.xy);\n";
         for (uint32_t i = 0; i < 16; i++)
