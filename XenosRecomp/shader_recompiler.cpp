@@ -23,7 +23,7 @@ float4 tfetch2DLodDenorm(constant Texture2DDescriptorHeap* textureHeap,
 {
     texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
     sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
-    return texture.sample(sampler, ((texCoord + offset) * scale + 0.5 * (scale - 1.0)) / (float2)getTexture2DDimensions(texture), level(lod));
+    return texture.sample(sampler, DENORM_TEXEL(texCoord, offset, scale) / (float2)getTexture2DDimensions(texture), level(lod));
 }
 
 float4 tfetch3DLod(constant Texture3DDescriptorHeap* textureHeap,
@@ -55,7 +55,7 @@ float4 tfetch2DLodDenorm(uint resourceDescriptorIndex, uint samplerDescriptorInd
 {
     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
     return texture.SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex],
-        ((texCoord + offset) * scale + 0.5 * (scale - 1.0)) / getTexture2DDimensions(texture), lod);
+        DENORM_TEXEL(texCoord, offset, scale) / getTexture2DDimensions(texture), lod);
 }
 
 float4 tfetch3DLod(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float lod)
@@ -531,6 +531,8 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
     }
     else if (vertexLevelZero)
         out += ", 0.0";
+    else if (isPixelShader && instr.opcode == FetchOpcode::TextureFetch)
+        out += ", g_MipBias"; // Skylanders: an upscaled scene's texture LOD bias (0 otherwise), as D3D's sampler bias
 
     out += ").";
 

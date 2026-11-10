@@ -21,6 +21,13 @@
 #define FLT_MAX asfloat(0x7f7fffff)
 #endif
 
+// Skylanders: the host texel coordinate of an unnormalized fetch (texCoordDenorm, with or without a LOD). The guest
+// coordinate lands on texel h's left and top edge, where the console, Apple and AMD read texel h but NVIDIA (its
+// fixed-point coordinate truncated after the float error) reads texel h - 1: each such pass moved the picture one host
+// pixel right and down (Trap Team's title halo). 1/256 of a texel (D3D's 8-bit subtexel step) inside the edge reads
+// texel h on every GPU and moves a bilinear fetch by 1/256 of a texel.
+#define DENORM_TEXEL(texCoord, offset, scale) (((texCoord) + (offset)) * (scale) + 0.5 * ((scale) - 1.0) + 1.0 / 256.0)
+
 #ifdef __spirv__
 
 struct PushConstants
@@ -40,6 +47,7 @@ struct PushConstants
 #define g_ResolutionScale          vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 300)
 #define g_ParamGen                 vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 276)
 #define g_ScaledTextures           vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 312)
+#define g_MipBias                  vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 316)
 // Skylanders: the vertices a fetch with a computed index reads, gathered by the host as float4s (count 0: none, and the
 // address is then 0: never read).
 #define g_PulledVertices           vk::RawBufferLoad<uint64_t>(g_PushConstants.SharedConstants + 288)
@@ -93,6 +101,8 @@ struct PushConstants
 #define g_ResolutionScale (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 300)))
 // Skylanders: sampler registers whose texture is g_ResolutionScale times its guest size (resolves), bit n = register n.
 #define g_ScaledTextures (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + 312)))
+// Skylanders: the texture LOD bias of an upscaled scene (docs/runtime/gpu/upscaling.md): 0 otherwise.
+#define g_MipBias (*(reinterpret_cast<device float*>(g_PushConstants.SharedConstants + 316)))
 #define PULLED_VERTEX(index) (g_PulledCount != 0 ? *(reinterpret_cast<device float4*>(g_PulledVertices + min(uint(index), g_PulledCount - 1) * 16)) : float4(0.0))
 
 #else
@@ -106,7 +116,8 @@ struct PushConstants
     float2 g_PositionScale : packoffset(c17.z); \
     uint g_PulledCount : packoffset(c18.z); \
     float g_ResolutionScale : packoffset(c18.w); \
-    uint g_ScaledTextures : packoffset(c19.z);
+    uint g_ScaledTextures : packoffset(c19.z); \
+    float g_MipBias : packoffset(c19.w);
 
 // Skylanders: D3D12 has no specialization constants. XenosRecomp compiles one DXIL shader per combination of the
 // shader's specialization constants, each with SPEC_CONSTANTS defined to it.
@@ -160,11 +171,11 @@ float4 tfetch2D(constant Texture2DDescriptorHeap* textureHeap,
                 constant SamplerDescriptorHeap* samplerHeap,
                 uint resourceDescriptorIndex,
                 uint samplerDescriptorIndex,
-                float2 texCoord, float2 offset, float scale)
+                float2 texCoord, float2 offset, float scale, float mipBias)
 {
     texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
     sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
-    return texture.sample(sampler, texCoord + offset * scale / (float2)getTexture2DDimensions(texture));
+    return texture.sample(sampler, texCoord + offset * scale / (float2)getTexture2DDimensions(texture), bias(mipBias));
 }
 
 // Skylanders: a vertex shader's fetch, at level 0.
@@ -197,7 +208,7 @@ float4 tfetch2DDenorm(constant Texture2DDescriptorHeap* textureHeap,
                       constant SamplerDescriptorHeap* samplerHeap,
                       uint resourceDescriptorIndex,
                       uint samplerDescriptorIndex,
-                      float2 texCoord, float2 offset, float scale)
+                      float2 texCoord, float2 offset, float scale, float mipBias)
 {
     texture2d<float> texture = textureHeap[resourceDescriptorIndex].tex;
     sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
@@ -205,7 +216,7 @@ float4 tfetch2DDenorm(constant Texture2DDescriptorHeap* textureHeap,
     // coordinate h + 0.5 - N / 2: the centre of texel h - 1 at scale 2, and even pixels read the previous guest pixel (a
     // dark checker on the left and top edges of every silhouette). (scale - 1) / 2 puts it back on texel h's left edge,
     // where the fetch lands at scale 1 and on the console.
-    return texture.sample(sampler, ((texCoord + offset) * scale + 0.5 * (scale - 1.0)) / (float2)getTexture2DDimensions(texture));
+    return texture.sample(sampler, DENORM_TEXEL(texCoord, offset, scale) / (float2)getTexture2DDimensions(texture), bias(mipBias));
 }
 
 float2 getWeights2DDenorm(constant Texture2DDescriptorHeap* textureHeap,
@@ -221,22 +232,22 @@ float4 tfetch3D(constant Texture3DDescriptorHeap* textureHeap,
                 constant SamplerDescriptorHeap* samplerHeap,
                 uint resourceDescriptorIndex,
                 uint samplerDescriptorIndex,
-                float3 texCoord)
+                float3 texCoord, float mipBias)
 {
     texture3d<float> texture = textureHeap[resourceDescriptorIndex].tex;
     sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
-    return texture.sample(sampler, texCoord);
+    return texture.sample(sampler, texCoord, bias(mipBias));
 }
 
 float4 tfetchCube(constant TextureCubeDescriptorHeap* textureHeap,
                   constant SamplerDescriptorHeap* samplerHeap,
                   uint resourceDescriptorIndex,
                   uint samplerDescriptorIndex,
-                  float3 texCoord, thread CubeMapData* cubeMapData)
+                  float3 texCoord, thread CubeMapData* cubeMapData, float mipBias)
 {
     texturecube<float> texture = textureHeap[resourceDescriptorIndex].tex;
     sampler sampler = samplerHeap[samplerDescriptorIndex].samp;
-    return texture.sample(sampler, cubeMapData->cubeMapDirections[(uint)texCoord.z]);
+    return texture.sample(sampler, cubeMapData->cubeMapDirections[(uint)texCoord.z], bias(mipBias));
 }
 
 float4 cube(float4 value, thread CubeMapData* cubeMapData)
@@ -263,10 +274,10 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
 }
 
 // Skylanders: `scale` as above (offsets in guest texels).
-float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float scale)
+float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float scale, float mipBias)
 {
     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
-    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset * scale / getTexture2DDimensions(texture));
+    return texture.SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset * scale / getTexture2DDimensions(texture), mipBias);
 }
 
 // Skylanders: a vertex shader's fetch, at level 0.
@@ -283,11 +294,11 @@ float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, f
 }
 
 // Skylanders: unnormalized coordinates (texCoordDenorm), in texels.
-float4 tfetch2DDenorm(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float scale)
+float4 tfetch2DDenorm(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float scale, float mipBias)
 {
     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
     // Skylanders: (scale - 1) / 2 keeps the fetch on the host pixel's own texel at scale N (see the Metal version).
-    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], ((texCoord + offset) * scale + 0.5 * (scale - 1.0)) / getTexture2DDimensions(texture));
+    return texture.SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], DENORM_TEXEL(texCoord, offset, scale) / getTexture2DDimensions(texture), mipBias);
 }
 
 float2 getWeights2DDenorm(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float scale)
@@ -295,14 +306,14 @@ float2 getWeights2DDenorm(uint resourceDescriptorIndex, uint samplerDescriptorIn
     return select(isnan(texCoord), 0.0, frac(texCoord + offset - 0.5));
 }
 
-float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)
+float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, float mipBias)
 {
-    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
+    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord, mipBias);
 }
 
-float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
+float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData, float mipBias)
 {
-    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
+    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleBias(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], mipBias);
 }
 
 float4 cube(float4 value, inout CubeMapData cubeMapData)
