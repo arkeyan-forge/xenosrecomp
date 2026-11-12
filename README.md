@@ -1,3 +1,5 @@
+> **This repository is archived.** Its content now lives in [arkeyan-forge/forge](https://github.com/arkeyan-forge/forge) (one repository for the whole project, since 2026-11-12).
+
 # XenosRecomp
 
 XenosRecomp is a tool that converts Xbox 360 shader binaries to HLSL. The resulting files can be recompiled to DXIL and SPIR-V using the DirectX Shader Compiler (DXC) for use in Direct3D 12 (D3D12) and Vulkan.
